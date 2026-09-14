@@ -68,21 +68,6 @@ resource "aws_route_table_association" "public_rt_assoc_2" {
   route_table_id = aws_route_table.public_rt.id
 }
 
-#6. Query latest Amazon Linux 2 AMI
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"] # this will help avoid the issue with installing the aws cli on the ubuntu ami.
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"] # Amazon Linux 2023 AMI
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
 
 #7. Security Group for the application Host. 
 resource "aws_security_group" "app_sg" {
@@ -167,10 +152,11 @@ resource "aws_lb" "main" {
 
 #11. Target Group for the ALB
 resource "aws_lb_target_group" "app_tg" {
-  name     = "${var.project_name}-tg"
-  port     = 8000
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
+  name        = "${var.project_name}-tg"
+  port        = 8000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
 
   health_check {
     path                = "/health"
@@ -198,58 +184,11 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-#13. Launch Template for the EC2 instance
-resource "aws_launch_template" "app_lt" {
-  name_prefix   = "${var.project_name}-lt-"
-  image_id      = data.aws_ami.amazon_linux.id
-  instance_type = "t3.micro"
-
-  # ADD THIS BLOCK:
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_profile.name
-  }
-
-  network_interfaces {
-    associate_public_ip_address = true
-    security_groups             = [aws_security_group.app_sg.id]
-  }
-
-  #Launch template require base64 encoded user data.
-  user_data = filebase64("${path.module}/userdata.sh")
-
-  tags = {
-    Name = "${var.project_name}-app-server"
-  }
-}
-
-#14. Auto Scaling Group for the EC2 instance
-resource "aws_autoscaling_group" "app_asg" {
-  name                = "${var.project_name}-asg"
-  vpc_zone_identifier = [aws_subnet.public_1.id, aws_subnet.public_2.id]
-  target_group_arns   = [aws_lb_target_group.app_tg.arn]
-  health_check_type   = "EC2"
-  desired_capacity    = 2
-  max_size            = 3
-  min_size            = 1
-
-
-  launch_template {
-    id      = aws_launch_template.app_lt.id
-    version = "$Latest"
-  }
-
-  tag {
-    key                 = "Name"
-    value               = "${var.project_name}-app-server"
-    propagate_at_launch = true
-  }
-}
-
 
 #15. Elastic Container Registry (ECR)
 resource "aws_ecr_repository" "app_repo" {
   name                 = "${var.project_name}-repo"
-  force_delete         = true  # Force delete the repository when the Terraform state is destroyed
+  force_delete         = true # Force delete the repository when the Terraform state is destroyed
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -261,9 +200,39 @@ resource "aws_ecr_repository" "app_repo" {
   }
 }
 
-#16. IAM Role for the EC2 instance to access ECR
-resource "aws_iam_role" "ec2_ecr_role" {
-  name = "${var.project_name}-ec2-ecr-role"
+# ========================================
+# ECS FARGATE RESOURCES
+# ========================================
+
+# 16. ECS Cluster — logical grouping for our services
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+
+  # Enable Container Insights for monitoring (CPU, memory, network metrics)
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = {
+    Name = "${var.project_name}-cluster"
+  }
+}
+
+# 17. CloudWatch Log Group — centralized container logs
+resource "aws_cloudwatch_log_group" "ecs" {
+  name              = "/ecs/${var.project_name}"
+  retention_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-logs"
+  }
+}
+
+# 18. ECS Task Execution Role — lets the ECS AGENT pull images and write logs
+resource "aws_iam_role" "ecs_execution_role" {
+  name = "${var.project_name}-ecs-execution-role"
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -271,20 +240,92 @@ resource "aws_iam_role" "ec2_ecr_role" {
         Action = "sts:AssumeRole"
         Effect = "Allow"
         Principal = {
-          Service = "ec2.amazonaws.com"
+          Service = "ecs-tasks.amazonaws.com"
         }
       }
     ]
   })
+
+  tags = {
+    Name = "${var.project_name}-ecs-execution-role"
+  }
 }
 
-resource "aws_iam_role_policy_attachment" "ec2_read_only" {
-  role       = aws_iam_role.ec2_ecr_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+resource "aws_iam_role_policy_attachment" "ecs_execution_policy" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "${var.project_name}-ec2-profile"
-  role = aws_iam_role.ec2_ecr_role.name
+
+# 19. ECS Task Definition — the container blueprint (replaces userdata.sh + docker run)
+resource "aws_ecs_task_definition" "app" {
+  family                   = "${var.project_name}-app"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "${var.project_name}-container"
+      image     = "${aws_ecr_repository.app_repo.repository_url}:latest"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 8000
+          protocol      = "tcp"
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.ecs.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "${var.project_name}-task-definition"
+  }
 }
 
+
+# 20. ECS Service — maintains desired tasks, connects to ALB, handles deployments
+resource "aws_ecs_service" "app" {
+  name            = "${var.project_name}-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  # Rolling deployment strategy — zero downtime
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  network_configuration {
+    subnets          = [aws_subnet.public_1.id, aws_subnet.public_2.id]
+    security_groups  = [aws_security_group.app_sg.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app_tg.arn
+    container_name   = "${var.project_name}-container"
+    container_port   = 8000
+  }
+
+  # Prevent Terraform from reverting image changes made by CI/CD pipeline
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
+  tags = {
+    Name = "${var.project_name}-service"
+  }
+}
