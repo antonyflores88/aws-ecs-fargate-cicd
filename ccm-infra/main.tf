@@ -329,3 +329,115 @@ resource "aws_ecs_service" "app" {
     Name = "${var.project_name}-service"
   }
 }
+
+
+# ========================================
+# GITHUB ACTIONS OIDC — zero-secret CI/CD authentication
+# ========================================
+
+# 21. Data source to get current AWS account ID dynamically
+data "aws_caller_identity" "current" {}
+
+# 22. GitHub OIDC Provider — tells AWS to trust GitHub as an identity provider
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+
+  tags = {
+    Name = "${var.project_name}-github-oidc"
+  }
+}
+
+# 23. IAM Role that GitHub Actions will assume
+resource "aws_iam_role" "github_actions" {
+  name = "${var.project_name}-github-actions-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:antonyflores88/aws-ecs-fargate-cicd:*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-github-actions-role"
+  }
+}
+
+# 24. Policy: Allow GitHub Actions to push images to ECR
+resource "aws_iam_role_policy" "github_actions_ecr" {
+  name = "${var.project_name}-github-ecr-policy"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = aws_ecr_repository.app_repo.arn
+      }
+    ]
+  })
+}
+
+# 25. Policy: Allow GitHub Actions to deploy to ECS
+resource "aws_iam_role_policy" "github_actions_ecs" {
+  name = "${var.project_name}-github-ecs-policy"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = aws_iam_role.ecs_execution_role.arn
+      }
+    ]
+  })
+}
