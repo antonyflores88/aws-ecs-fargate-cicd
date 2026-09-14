@@ -1,0 +1,43 @@
+# ========================
+# Terraform
+# ========================
+# State files contain sensitive infrastructure metadata — NEVER commit these
+*.tfstate
+*.tfstate.*
+
+# Variable override files may contain secrets (API keys, passwords)
+*.tfvars
+*.tfvars.json
+
+# Downloaded provider plugins (like node_modules — regenerated with terraform init)
+.terraform/
+
+# Crash logs from Terraform failures
+crash.log
+crash.*.log
+
+# Lock file is actually GOOD to commit (pins provider versions for reproducibility)
+# So we do NOT ignore .terraform.lock.hcl
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# ========================
+# Docker
+# ========================
+# Don't ship .env files with credentials into containers
+.env
+
+# ========================
+# OS / IDE
+# ========================
+.DS_Store
+.vscode/
+.idea/
+*.swp
