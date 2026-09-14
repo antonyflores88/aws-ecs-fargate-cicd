@@ -40,7 +40,7 @@ jobs:
         run: pip install -r requirements.txt pytest httpx
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: python -m pytest tests/ -v
 
       - name: Check Terraform formatting
         uses: hashicorp/setup-terraform@v3
