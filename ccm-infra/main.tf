@@ -367,7 +367,7 @@ resource "aws_iam_role" "github_actions" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:antonyflores88/aws-ecs-fargate-cicd:*"
+            "token.actions.githubusercontent.com:sub" = "repo:antonyflores88*/aws-ecs-fargate-cicd*:*"
           }
         }
       }
