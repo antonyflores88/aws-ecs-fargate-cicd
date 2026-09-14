@@ -18,6 +18,7 @@ env:
   ECS_CLUSTER: ccm-cluster
   ECS_SERVICE: ccm-service
   CONTAINER_NAME: ccm-container
+  ECS_TASK_DEFINITION: ccm-app
 
 jobs:
   # ============================================
@@ -84,7 +85,7 @@ jobs:
       - name: Download current ECS task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_CLUSTER }}-app \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
             --query taskDefinition \
             > task-definition.json
 
